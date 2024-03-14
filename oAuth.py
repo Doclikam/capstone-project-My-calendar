@@ -14,9 +14,11 @@ To do this, our application must build and send a GET request to the /authorize 
 
 """
 from flask import Flask, redirect, jsonify, request, session
-from detatime import datetime, timedelta, timestamp
+from datetime import datetime, timedelta
+from spotipy.oauth2 import SpotifyOAuth
 
 
+import spotipy
 import requests
 import urllib.parse
 
@@ -25,11 +27,14 @@ import urllib.parse
 
 #initializing flask apllication
 app=Flask(__name__)
+
+app.config['SESSION_COOKIE_NAME']='Spotify cookie'
 app.secret_key="45dddrt-569b-4668-a556-1f56778909"
 
 
 CLIENT_ID='7f6b402d2a8c480aa244cd87f64bbdb8'
-CLIENT_SECRET='1cf23b8d2e994dafb7cf867b08ccda7a'
+SPOTIFY_CLIENT_SECRET='1cf23b8d2e994dafb7cf867b08ccda7a'
+TOKEN_INFO='token_info'
 REDIRECT_URI="http://localhost:5000/callback"
 
 
@@ -47,51 +52,66 @@ def index():
 #creating a login endpoint
 @app.route('/login')
 def login():
-    #the scope will allow the app to read the users data
-    scope='user-read-private playlist0-modify-public playlist-modify-private user-read-email'
-
-    #setting parameters required 
-    parameters={
-        'client_id':CLIENT_ID,
-        'response_type': 'code',
-        'scope':scope,
-        'redirect_uri': REDIRECT_URI,
-        'show_dialog': True}
-
-
-    oAuth_url=(f"{AUTH_URL}?{urllib.parse.urlencode(parameters)}")
+    oAuth_url=create_spotify_oauth().get_authorize_url()
     return redirect(oAuth_url)
 
+def create_spotify_oauth():
+    #the scope will allow the app to read the users data
+    return spotipy.SpotifyOAuth(client_id=CLIENT_ID,
+        client_secret= SPOTIFY_CLIENT_SECRET,
+        response_type='code',
+        scope='user-read-private playlist0-modify-public playlist-modify-private user-read-email',
+        redirect_uri= REDIRECT_URI,
+        show_dialog=True)
+
+    
 #callback for API to return to when the user logs in
 @app.route('/redirect')
 def redirect():
-    session.clear()
     #handling error if 
-    if 'error' in request.orgs:
-        return jsonify({'error': request.orgs['error']})
+    if 'error' in request.args:
+        return jsonify({'error': request.args['error']})
 
-
-    if 'code' in request.orgs:
-        req_body={
-            'code': request.orgs['code'],
-            'grant_type':'authorization_code',
-            'redirect_uri': REDIRECT_URI,
-            'client_id': CLIENT_ID,
-            'client_secret': CLIENT_SECRET}
-        
-        response=requests.post(TOKEN_URL, data=req_body)
-        token_info=response.json()
-
-        session['access_token']=token_info['access_token']
-        session['refresh_token']=token_info['refresh_token']
-        session['expired_at']=datetime.now().timestamp()+token_info['expires_in']
-
-
-        return redirect('/playlists')
+    #if the auth'code' is in request sent, then the oAuth wull be returned for an access token  
+    if 'code' in request.args:
     
+        code =request.args.get('code')
+        grant_type='authorization_code'
+        redirect_uri= REDIRECT_URI
+        client_id= CLIENT_ID
+        client_secret= SPOTIFY_CLIENT_SECRET
+        token_info=create_spotify_oauth().get_access_token(code)
+        session[TOKEN_INFO]=token_info
+        
+        
+    
+    #the token can then be stored in this variable
+    token_info=response.json()
+
+
+    #the token info can then be stored in the session
+    session['access_token']=token_info['access_token']
+    session['refresh_token']=token_info['refresh_token']
+    session['expired_at']=datetime.now().timestamp()+token_info['expires_in']
+
+
+    return redirect('/playlists')
+
+
+
+
+app.route('/playlists')
 
 #getting playlists
 def get_playlists():
+    if 'access_token' not in session:
+        return redirect('/login')
+
+
+    if datetime.now().timestamp()>session['expired_at']:
+        return redirect('/refresh.token')
+
+
     headers={'Authorization':f"Bearer{[access_token]}"
     }
     response=requests.get(API_BASE_URL+'me/playlists', headers=headers)
@@ -99,3 +119,30 @@ def get_playlists():
     playlists=response.json()
 
     return jsonify(playlists)
+
+app.route('refresh-token')
+def refresh_token():
+    if refresh_token not in session:
+        return redirect('/login')
+
+    #if the token has expired then a fresh token should be generated
+    if datetime.now().timestamp()>session['expired_at']:
+        required_info={
+        'grant_type':'refresh_token', 
+        'refresh_token':session['refresh_token'],
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET
+        }
+
+
+        response=request.post(TOKEN_URL, data=required_info)
+        new_token_info=response.json()
+
+        #we can overwrite the old token with an new token 
+        session['access_token']=new_token_info['access_token']
+        #we can now get a new expiry time for the token
+        session['expired_at']=datetime.now().timestamp()+new_token_info['expires_in']
+
+#running flask on our local host
+if __name__=='__main__':
+    app.run(host='0.0.0.0', debug=True)
